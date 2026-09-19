@@ -486,6 +486,8 @@ static std::unordered_map<String, CHSetting> mergeTreeTableSettings = {
          },
          {"'map'", "'map_with_buckets'", "'advanced'", "'advanced_chunked'"},
          false)},
+    {"object_shared_data_target_chunk_rows",
+     CHSetting(rowsRangeNonZero, {"1", "2", "4", "8", "32", "64", "1024", "2048", "4096", "16384"}, false)},
     {"old_parts_lifetime",
      CHSetting(
          [](RandomGenerator & rg, FuzzConfig &) { return std::to_string(rg.thresholdGenerator<uint64_t>(0.2, 0.2, 10, 8 * 60)); },
