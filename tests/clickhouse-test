@@ -1846,6 +1846,11 @@ class SettingsRandomizer:
         "optimize_use_projections": lambda: random.random() > 0.05,
         "optimize_use_implicit_projections": lambda: random.random() > 0.05,
         "optimize_use_projection_filtering": lambda: random.random() > 0.05,
+        # Which projection is chosen, never the answer: `prefer_optimize_projection` takes a usable
+        # one regardless of its estimated cost, and the bound below makes the matcher treat a large
+        # IN-clause set as non-matching (0 disables content-hash comparison for such sets entirely).
+        "prefer_optimize_projection": lambda: random.random() < 0.3,
+        "query_plan_max_set_size_for_projection_match": lambda: random.choice([0, 1, 100, 10000, 1000000]),
         "query_plan_optimize_lazy_materialization": lambda: random.random() > 0.05,
         "query_plan_optimize_prewhere": lambda: random.random() > 0.05,
         "use_async_executor_for_materialized_views": lambda: random.randint(0, 1),
@@ -1880,12 +1885,13 @@ class SettingsRandomizer:
             'dphyp,dpsize,greedy', 'dpsub,dphyp,greedy',
         ]),
         "query_plan_optimize_join_order_max_searched_plans": lambda: random.choice([0, 1, 10, 100, 1000, 100000]),
-        # Reachable: dpsub is in the algorithm list above. Both decide which reorderings
-        # DPsub considers valid, so an unsound detector is a wrong-results bug.
-        # Disable for now, issue found. Renamed in 26.9 (no alias kept), so the old
-        # cd_a/cd_c names would be unknown settings if these are re-enabled.
-        #"query_plan_optimize_join_order_use_conflict_detector_a": lambda: random.randint(0, 1),
-        #"query_plan_optimize_join_order_use_conflict_detector_c": lambda: random.randint(0, 1),
+        # Reachable: dpsub is in the algorithm list above. The detector decides which reorderings
+        # DPsub considers valid, so an unsound one is a wrong-results bug. The two `cd_a`/`cd_c`
+        # flags this replaces were renamed into this enum in 26.9 with no alias kept, and the bug
+        # that kept them disabled (#118520) is fixed. The default `''` (no detector) is left out
+        # because `cli_format_settings` renders an empty value as a bare `--setting` that swallows
+        # the next option; it still runs whenever the algorithm list above excludes dpsub.
+        "query_plan_optimize_join_order_conflict_detector": lambda: random.choice(["a", "c"]),
         "max_bytes_before_external_join": lambda: random.choice([0, 1000000000]),
         "grace_hash_join_initial_buckets": lambda: random.choice([1, 2, 4, 8]),
         "query_plan_optimize_join_order_randomize": lambda: 0 if (r := random.random()) < 0.05 else 1 if r < 0.10 else random.randint(2, 1_000_000),
@@ -1899,7 +1905,9 @@ class SettingsRandomizer:
         "normalize_function_names": lambda: random.random() > 0.05,
         "enable_join_runtime_filters": lambda: random.random() > 0.05,
         # 0 always builds the runtime filter, a huge value never does
-        "join_runtime_filter_min_probe_rows": lambda: random.choice([0, 100, 1000, 1_000_000]),
+        # Capped below a typical probe side: a threshold above it suppresses the runtime filter for
+        # every test, which is a blanket feature-disable rather than coverage.
+        "join_runtime_filter_min_probe_rows": lambda: 0 if random.random() < 0.1 else random.randint(1, 10000),
         "enable_parallel_blocks_marshalling": lambda: random.random() > 0.05,
         # Default-false query_plan_* toggles: enable with 0.3 probability
         "query_plan_reuse_storage_ordering_for_window_functions": lambda: random.random() < 0.3,
@@ -1979,6 +1987,9 @@ class SettingsRandomizer:
         "join_runtime_filter_from_fixed_hash_table": lambda: random.random() > 0.05,
         "use_text_index_tokens_cache": lambda: random.random() > 0.05,
         "use_text_index_header_cache": lambda: random.random() > 0.05,
+        # The posting list cache went global in 26.10; before that each query used a private one, so
+        # the two paths differ. Like its sibling caches above, it must not change the result.
+        "use_text_index_postings_cache": lambda: random.random() > 0.05,
         "query_plan_min_columns_for_join_lazy_indexing": lambda: random.randint(0, 5),
         "query_plan_max_limit_for_join_lazy_indexing": lambda: random.choice([0, 100, 1000, 10000]),
         "compile_regular_expressions": lambda: random.randint(0, 1),
@@ -1991,6 +2002,13 @@ class SettingsRandomizer:
         # subquery over a recursive CTE throws NOT_IMPLEMENTED "Cannot clone ReadFromRecursiveCTEStep".
         # "correlated_subqueries_use_in_memory_buffer": lambda: random.random() > 0.05,
         "use_parquet_metadata_cache": lambda: random.randint(0, 1),
+        # Caches parsed Paimon manifest lists and manifests, like `use_parquet_metadata_cache` above.
+        "use_paimon_metadata_files_cache": lambda: random.randint(0, 1),
+        # Eager aggregation below a join in the Cascades optimizer - a rewrite, so any output change
+        # is a bug.
+        "cascades_aggregation_pushdown": lambda: random.random() > 0.05,
+        # Only changes when a dictionary is loaded, not what it returns.
+        "dictionary_lazy_load": lambda: random.choice(["auto", "0", "1"]),
         # Not randomized: a FIPS build rejects MD5 outright (`Requests.cpp`), so every test
         # touching S3 storage fails there, and an S3Express bucket rejects it too.
         # Iceberg manifest decode concurrency and the queue between the decode tasks and the
