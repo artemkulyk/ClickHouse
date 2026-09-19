@@ -683,6 +683,9 @@ all_running = True
 # `start_clickhouse` clears `clickhouse_forced_stop`, so a shutdown that hung mid-run would
 # be forgotten by the time teardown looks at it. Remember which servers it happened to.
 forced_stop_during_run: set[str] = set()
+# A stop that left the process alive. The teardown stop may get it on the second try, so
+# this is the only record that the run had a stop failure.
+stop_failed_during_run: set[str] = set()
 tables_oracle: ElOraculoDeTablas = ElOraculoDeTablas()
 # Shutdown info
 lower_bound, upper_bound = args.time_between_shutdowns
@@ -776,6 +779,16 @@ while all_running and (not reached_limit):
                     "force killed during a scheduled restart"
                 )
                 forced_stop_during_run.add(next_pick.name)
+            if next_pick.get_process_pid("clickhouse") is not None:
+                # `stop_clickhouse` swallowed an error and returned without force killing.
+                # Going on would reach `start_clickhouse`, which takes a live pid for
+                # "already running", so the restart would silently never happen.
+                logger.error(
+                    f"Server {next_pick.name} is still running after the stop attempt "
+                    "during a scheduled restart"
+                )
+                stop_failed_during_run.add(next_pick.name)
+                all_running = False
         except Exception as ex:
             logger.error(f"Failed to stop ClickHouse: {ex}")
             logger.info(f"The server {next_pick.name} is not running")
@@ -1006,6 +1019,15 @@ for server in servers:
             f"Server {server.name} had to be force killed during a scheduled restart earlier in the run"
         )
         log_server_backtrace(server)
+        good_exit = False
+    if server.name in stop_failed_during_run:
+        # A scheduled restart's stop attempt returned with the server still up. The teardown
+        # stop above may have got it on the second try, so this is the only record that the
+        # run contained a stop failure at all.
+        logging.error(
+            f"Server {server.name} was still running after a stop attempt during a "
+            "scheduled restart earlier in the run"
+        )
         good_exit = False
     if grep_server_logs(server, "Logical error:"):
         logging.error(f"Logical error in instance '{server.name}'")
