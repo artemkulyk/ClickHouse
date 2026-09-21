@@ -5266,8 +5266,15 @@ class ClickHouseInstance:
         self.clickhouse_exec_id = ""
         # Terminal state of the last server exec. `clickhouse_exec_id` is dropped once
         # the process is gone, so these keep how it went away available to callers.
+        # They describe the server running now, and every start clears them: a value
+        # left over from an earlier server reads as this one's exit.
         self.clickhouse_last_exit_code = None
         self.clickhouse_forced_stop = False
+        # The same verdict for the server a version-swap helper replaced. Held apart
+        # because those helpers stop and start in one call, leaving the caller no window
+        # to read the fields above before the replacement resets them.
+        self.clickhouse_preswap_exit_code = None
+        self.clickhouse_preswap_forced_stop = False
         # Filled by `probe_slow_build()`; `None` until the server has been asked successfully.
         self._is_slow_build = None
 
@@ -6264,14 +6271,15 @@ class ClickHouseInstance:
     def _start_after_binary_swap(self):
         """Start the replacement server of a version-swap helper.
 
-        The exec id has to go and stay gone: this start daemonizes, so the exec is a launcher
-        that exits 0 the moment it has forked, and keeping its id would let
-        `_capture_clickhouse_exit` report a clean exit for a server that went on to crash.
-        What `_stop_for_binary_swap` recorded about the server being replaced is kept, so a
-        caller can still see it had to be force killed and with what code it went - a plain
-        `start_clickhouse` clears both, but there the caller had a window between the two
-        calls to read them, and here there is none.
+        The exec id has to go: this start daemonizes, so the exec is a launcher that exits 0
+        once it has forked, and its code says nothing about how the server later went away.
+        The stop verdict belongs to the server being replaced, so it moves to the `preswap`
+        fields - left in place it would be read as the replacement's own exit.
         """
+        self.clickhouse_preswap_exit_code = self.clickhouse_last_exit_code
+        self.clickhouse_preswap_forced_stop = self.clickhouse_forced_stop
+        self.clickhouse_last_exit_code = None
+        self.clickhouse_forced_stop = False
         self.clickhouse_exec_id = ""
         self.exec_in_container(
             ["bash", "-c", self.clickhouse_start_command_in_daemon],
