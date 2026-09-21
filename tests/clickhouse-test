@@ -2151,10 +2151,11 @@ class SettingsRandomizer:
         "enable_hash_join_row_store": lambda: random.random() > 0.05,
         # 0 always allows the row-store transformation, a huge ratio never does
         "min_rows_ratio_for_hash_join_row_store": lambda: random.choice([0.0, 5.0, 1000.0]),
-        # Reranges the right table by key in left/inner hash join, a pure performance rewrite,
-        # so any output change is a bug. Only arms when join_to_sort_minimum_perkey_rows and
-        # join_to_sort_maximum_table_rows are both met, so most joins are left alone.
-        "allow_join_right_table_sorting": lambda: random.random() < 0.3,
+        # Don't randomize: reranging the right table by key is a pure performance rewrite, but
+        # with it on the hash join stops applying max_joined_block_size_rows and emits one block
+        # per key - a memory guard silently lifted, which 03633_join_many_matches_limit catches.
+        # Re-enable once that is fixed; the setting is otherwise worth covering.
+        # "allow_join_right_table_sorting": lambda: random.random() < 0.3,
         "query_plan_fuse_filter_into_array_join": lambda: random.random() > 0.05,
         # Don't randomize: breaks rowNumberInAllBlocks() over arrayJoin() and throws on lazily
         # evaluated arguments. #117882 enables it by default and already carries those failures.
