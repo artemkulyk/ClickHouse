@@ -110,6 +110,12 @@ def server_log_reports_oom(server_log_path: Path, results: List[Result]) -> bool
     a kill line beyond those can be the kernel's - and only that one may pass the run
     as an out-of-memory one. The harness's kill is the mark of a server that would not
     stop, and reading it as an OOM would rewrite whatever failed after it to OK.
+
+    The rows span the whole run, so the kill lines have to as well, or an announced kill
+    would cancel out a later real one. They do: the runners archive the plain log at each
+    phase boundary but never touch `clickhouse-server.err.log`, which the logger never
+    rotates either (`tests/config/config.d/logging_no_rotate.xml`), and the watchdog logs
+    the kill at Fatal - so that one live file holds every incarnation's.
     """
     kill_lines = count_kill_lines(server_log_path)
     if kill_lines == 0:
@@ -156,6 +162,35 @@ def _replica_logs(logs: List[Path], replica: str | None) -> List[Path]:
     if replica is None:
         return [p for p in logs if "sc1" not in p.name and "sc2" not in p.name]
     return [p for p in logs if replica in p.name]
+
+
+# The parser's own two report patterns, so that the stderr scan below fires exactly when the
+# parser has something to say about the file rather than on a substring of its own choosing.
+STDERR_REPORT_PATTERN = (
+    f"{FuzzerLogParser.SANITIZER_ERROR_PATTERN}|{FuzzerLogParser.RUNTIME_ERROR_PATTERN}"
+)
+
+
+def stderr_reports_sanitizer_error(stderr_logs: List[Path]) -> bool:
+    """Whether a stderr log holds a sanitizer or runtime-error report that is not an OOM.
+
+    A sanitizer report never goes through the logger, and TSan - like a UBSan build that
+    recovers - prints one and lets the server run on. Such a report leaves neither a
+    `<Fatal>` record nor a dead process, so it is its own trigger for the log parser.
+
+    The out-of-memory report is left out: it is benign, and reaching the parser for it
+    would also let the parser's OOM verdict rewrite unrelated failing rows to OK.
+    """
+    if not stderr_logs:
+        return False
+    files = " ".join(f"'{p}'" for p in stderr_logs)
+    # `-z` because the logger gzips on rotation. Filtering the OOM reports out of the match
+    # stream rather than bounding the search keeps a real report that sits behind them.
+    hit = Shell.get_output(
+        f"rg -z --text --no-filename -- '{STDERR_REPORT_PATTERN}' {files}"
+        f" | rg -v -m 1 -- '{SANITIZER_OOM_REPORT_PATTERN}'"
+    )
+    return bool(hit.strip())
 
 
 # The runner agent lives on the host, outside this container, so it is only safe if the container cannot take the whole box.
@@ -418,8 +453,9 @@ class ReplicaFailures:
     memory-limit verdict; otherwise the one expected-only / "Unknown error" fallback; empty
     when nothing could be parsed at all. The flags say which tier `results` came from,
     because the caller treats the tiers differently: a crash - named or not - is a bug that
-    no OOM downgrade may bury, while an expected-only line names a run that something else
-    already declared failed and is not a failure of its own.
+    no OOM downgrade may bury, an out-of-memory verdict passes the run outright, and an
+    expected-only line names a run that something else already declared failed and is not
+    a failure of its own.
     """
 
     results: List[Finding] = field(default_factory=list)
@@ -433,6 +469,20 @@ class ReplicaFailures:
     expected_only: bool = False
     # `expected_only`, and the line is a sanitizer OOM report rather than the kill line.
     expected_only_oom: bool = False
+    # `results` holds the memory-limit verdict: the server refused an allocation over its
+    # own cap and said so. Ranked below every crash for that reason, and out of memory in
+    # the same sense the sanitizer report is.
+    memory_limit: bool = False
+
+    @property
+    def reports_oom(self) -> bool:
+        """Whether the tier `results` came from is an out-of-memory verdict.
+
+        Both ways the parser can reach one: the sanitizer's report among the expected-only
+        lines, and the server's own memory cap. Neither is a bug, and running out of
+        memory passes a stress run - so the caller must not tell the two tiers apart.
+        """
+        return self.expected_only_oom or self.memory_limit
 
 
 # Ranking inside the expected-only tier, which needs one of its own because every verdict
@@ -538,7 +588,7 @@ def select_replica_failures(
     if fatal_result is not None:
         return ReplicaFailures(results=[fatal_result], crash_named=True)
     if memory_limit_result is not None:
-        return ReplicaFailures(results=[memory_limit_result])
+        return ReplicaFailures(results=[memory_limit_result], memory_limit=True)
     if fallback_result is not None:
         name, description, _ = fallback_result
         # Read off the same rank the selection used, so what was picked and what it is
@@ -639,11 +689,20 @@ def run_stress_test(upgrade_check: bool = False) -> None:
         if not test_result.is_ok():
             failed_results.append(test_result)
 
-    if server_died or crash_evidence:
+    # The runner moves the current `stderr.log` to the result directory and leaves the
+    # rotated ones in the server log directory, so the family spans both.
+    stderr_logs = _log_family(
+        result_path, lambda n: n.startswith("stderr")
+    ) + _log_family(server_log_path, lambda n: n.startswith("stderr"))
+    # The third trigger, beside a dead server and a `<Fatal>` record: `crash_evidence` reads
+    # the server logs alone, so a report that only ever reached stderr - and that killed
+    # nothing - would otherwise never be looked at and the run would finish green.
+    stderr_evidence = stderr_reports_sanitizer_error(stderr_logs)
+
+    if server_died or crash_evidence or stderr_evidence:
         # Both whole log families per replica, rotated files included, each handed to a single
         # parser call: the parser defers an expected kill line only across the logs it gets at
-        # once. The runner moves the current `stderr.log` to the result directory and leaves
-        # the rotated ones in the server log directory, so that family spans both.
+        # once.
         replica_log_pairs: list[tuple[str, list[Path], list[Path]]] = []
         # The full `clickhouse-server*.log*` family, not just `.err.`: `crash_evidence` above
         # is already set from a fatal anywhere in that whole family, so a fatal that landed
@@ -651,9 +710,6 @@ def run_stress_test(upgrade_check: bool = False) -> None:
         server_logs_family = _log_family(
             server_log_path, lambda n: n.startswith("clickhouse-server") and ".log" in n
         )
-        stderr_logs = _log_family(
-            result_path, lambda n: n.startswith("stderr")
-        ) + _log_family(server_log_path, lambda n: n.startswith("stderr"))
 
         for replica_name, replica in (("main", None), ("sc1", "sc1"), ("sc2", "sc2")):
             replica_server_logs = _replica_logs(server_logs_family, replica)
@@ -679,21 +735,21 @@ def run_stress_test(upgrade_check: bool = False) -> None:
             # The memory limit is not: it is what an out-of-memory run reports.
             crash_named = failures.crash_named
             # An expected-only verdict names a run that something else already declared
-            # failed. When `crash_evidence` alone brought us here it declared nothing: with
+            # failed. When only a log scan brought us here it declared nothing: with
             # rotated logs in scope the `<Fatal>` it found can be the expected kill itself,
             # and reporting that would fail a run for its own restart. A `<Fatal>` the
             # parser cannot name is not expected-only, and reports as a crash above.
             expected_only = failures.expected_only and not server_died
             # OOM is allowed in stress tests outright - `is_oom` above already passes the
-            # run for a report in a current log or dmesg. One found only via
-            # `parse_failure(allow_expected_only=True)` can equally be a report that
-            # rotated out of the current log, which `is_oom`'s own scan does not cover.
+            # run for a report in a current log or dmesg. The parser reaches one the scan
+            # above cannot: a report that rotated out of the current log, and the server's
+            # own memory cap, which leaves no SIGKILL and no dmesg line to find at all.
             # `server_died` says only that the process crashed, not why, so this is
             # checked independently of the `not server_died` guard above.
-            if failures.expected_only_oom:
+            if failures.reports_oom:
                 is_oom = True
                 print(
-                    "Only a sanitizer OOM report in the server logs: "
+                    "Only an out-of-memory verdict in the server logs: "
                     f"{failures.results[0][0]}"
                 )
             elif expected_only:

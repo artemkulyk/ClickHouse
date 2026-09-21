@@ -440,7 +440,7 @@ def analyze_job_logs(
     # Same reasoning for the other two client-side findings, and the same reason the marker
     # is part of the contract rather than mere evidence: exit 49 is equally LOGICAL_ERROR,
     # and a BuzzHouse exit 227 is either a disallowed error code or the fuzzer giving up.
-    # Without the marker line neither is a finding, and the generic branch below is right.
+    # Without the marker line neither is named - a 227 is still a failure, see below.
     ast_oracle_error = (
         Shell.get_output(f"rg --text -A 30 '{AST_FUZZER_ORACLE_MARKER}' {fuzzer_log}")
         if fuzzer_exit_code == AST_FUZZER_ORACLE_EXIT_CODE
@@ -456,11 +456,17 @@ def analyze_job_logs(
         if fuzzer_exit_code == BUZZHOUSE_EXCEPTION_EXIT_CODE and not server_died
         else ""
     )
-    # A finding the client reported and left proof of in its log. A sanitizer OOM elsewhere in
-    # the run explains none of them, so all three skip the OOM downgrade below - not only
-    # `oracle_finding`, which would otherwise let an OOM rewrite an already-classified
-    # wrong-result or disallowed-error finding to OK.
-    client_finding = oracle_finding or bool(ast_oracle_error) or bool(buzzhouse_error)
+    # The client's own verdict on the run, which a sanitizer OOM elsewhere explains in no
+    # case: all of these skip the OOM downgrade below, not only `oracle_finding`. A
+    # BuzzHouse exception exit counts with or without its marker - without it the fuzzer
+    # gave up, still a client-side failure - but not once the server died, which the OOM
+    # may well be the cause of.
+    client_finding = (
+        oracle_finding
+        or bool(ast_oracle_error)
+        or bool(buzzhouse_error)
+        or (fuzzer_exit_code == BUZZHOUSE_EXCEPTION_EXIT_CODE and not server_died)
+    )
     if server_died:
         # Server died - status will be determined after OOM checks
         is_failed = True

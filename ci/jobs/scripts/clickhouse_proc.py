@@ -2,6 +2,7 @@ import glob
 import io
 import os
 import platform
+import re
 import shlex
 import signal
 import subprocess
@@ -19,6 +20,7 @@ from ci.jobs.scripts.clickhouse_service import ClickHouseService
 from ci.jobs.scripts.log_parser import (
     EXPECTED_KILL_PATTERN,
     SANITIZER_OOM_PATTERN,
+    SANITIZER_OOM_REPORT_PATTERN,
     FuzzerLogParser,
 )
 from ci.jobs.scripts.server_cleanup import kill_leftover_server_processes
@@ -1208,32 +1210,50 @@ fi
                     # yet) comes back as the same "Unknown error", so a name in the second
                     # pass proves only that an expected line exists *somewhere*, not that
                     # every `<Fatal>` line is accounted for. Require that too before trusting it.
-                    expected_only = (
-                        log_parser.parse_failure(allow_expected_only=True)[0]
+                    expected_name, expected_info, expected_files = (
+                        log_parser.parse_failure(allow_expected_only=True)
                         if name == FuzzerLogParser.UNKNOWN_ERROR
-                        else None
+                        else (None, "", [])
                     )
                     unexplained_fatal = bool(
-                        expected_only
+                        expected_name
                         and Shell.get_output(
                             f"rg -z --text '{fatal_pattern}' "
                             f"{' '.join(str(p) for p in server_logs + stderr_logs)}"
                             f" | rg --text -v '{SANITIZER_OOM_PATTERN}|{EXPECTED_KILL_PATTERN}'"
                         )
                     )
+                    # Of the expected lines only the end-of-run SIGKILL is routine here. A
+                    # sanitizer out-of-memory report is expected in the jobs that drive the
+                    # server to its memory limit on purpose, not in a functional test - and
+                    # an allocator refusing a request never reaches the kernel OOM killer,
+                    # so `check_ch_is_oom_killed` does not catch it either.
+                    oom_report = bool(
+                        expected_name
+                        and re.search(SANITIZER_OOM_REPORT_PATTERN, expected_info)
+                    )
                     if (
-                        expected_only
-                        and expected_only != FuzzerLogParser.UNKNOWN_ERROR
+                        expected_name
+                        and expected_name != FuzzerLogParser.UNKNOWN_ERROR
                         and not unexplained_fatal
+                        and not oom_report
                     ):
                         results.append(
                             Result.create_from(
                                 name="Sanitizer assert or Fatal messages in server logs",
-                                info=f"only expected messages found: {expected_only}",
+                                info=f"only expected messages found: {expected_name}",
                                 status=Result.Status.OK,
                             )
                         )
                     else:
+                        if oom_report:
+                            # Report what the second pass named: the first pass deferred the
+                            # report and left only "Unknown error" to fail the run with.
+                            name, description, files = (
+                                expected_name,
+                                expected_info,
+                                expected_files,
+                            )
                         results.append(
                             Result.create_from(
                                 name=name,
