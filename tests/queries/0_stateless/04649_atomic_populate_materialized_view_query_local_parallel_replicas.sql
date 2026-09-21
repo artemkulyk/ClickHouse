@@ -7,7 +7,6 @@
 SET materialized_views_populate_atomically = 1;
 
 SET automatic_parallel_replicas_mode = 0;
-SET parallel_replicas_only_with_analyzer = 0; -- necessary for CI run with disabled analyzer
 SET parallel_replicas_for_non_replicated_merge_tree = 1;
 
 DROP TABLE IF EXISTS src;
