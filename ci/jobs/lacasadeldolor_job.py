@@ -45,7 +45,10 @@ FORCED_STOP_MESSAGE = "did not shut down gracefully and had to be force killed"
 # The other way a stop can fail: `stop_clickhouse` returns with the process still up, so it
 # never reaches the force-kill above and logs no message of its own (its broad `except` does
 # this). `dolor.py` fails the run on it, and it leaves no exit code to collapse either.
-STOP_FAILED_MESSAGE = "is still running after stop command"
+# It reports this on three paths - the teardown stop, a scheduled restart's stop, and the
+# teardown's record of that restart - so match the phrase all three share rather than any
+# one wording, or the restart paths silently never set the flag.
+STOP_FAILED_MESSAGE = "still running after a stop attempt"
 # Shared prefix of the two exit-bookkeeping failures in `dolor.py`: the exec could not be
 # inspected and no code was recorded, or a server stopped without recording one. Neither
 # leaves any other trace in the log, so without this marker they are `good_exit = False`
@@ -410,11 +413,11 @@ def _classify_failed_run(
             results=[
                 Result(
                     name="Server shutdown",
-                    info="A server was still running after the stop command. Check fuzzer.log.",
+                    info="A server was still running after a stop attempt. Check fuzzer.log.",
                     status=Result.Status.FAIL,
                 )
             ],
-            info="A server was still running after the stop command",
+            info="A server was still running after a stop attempt",
             stopwatch=sw,
         )
     # The generator dying before cleanup is its own failure, whatever the servers did: an OOM
@@ -943,7 +946,7 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
     if forced_stop:
         print("A server had to be force killed on shutdown - not a kernel OOM")
     if stop_failed:
-        print("A server was still running after the stop command")
+        print("A server was still running after a stop attempt")
     server_exit_code = collapse_server_exit_code(node_exit_codes, forced_stop)
     # An abnormal exit code IS the server dying, and a pure kernel OOM logs no message
     # the patterns above match, so derive the flag rather than string-match for it.

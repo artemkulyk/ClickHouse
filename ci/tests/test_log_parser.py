@@ -175,6 +175,28 @@ def test_quoted_fatal_in_query_text_is_not_a_generic_fatal(tmp_path):
     assert result_name == FuzzerLogParser.UNKNOWN_ERROR
     assert parser.is_generic_fatal is False
     assert "not an error" not in result_name
+    # Same anchoring in the unnamed-fatal scan: callers treat anything it returns as
+    # crash evidence, so a quoted "<Fatal>" there fails a run that never failed.
+    assert parser.find_unnamed_fatals() == []
+
+
+def test_find_unnamed_fatals_returns_real_fatal_records(tmp_path):
+    # The counterpart to the anchoring above: a genuine unclassified <Fatal> record must
+    # still be returned, whole line, while the quoted one beside it is left out.
+    server_log = tmp_path / "clickhouse-server.err.log"
+    server_log.write_text(
+        "2026.09.04 00:44:57.900000 [ 1068 ] {q} <Debug> executeQuery: "
+        "(from 127.0.0.1) SELECT '<Fatal> not an error' (stage: Complete)\n"
+        "2026.09.04 00:44:58.000000 [ 1068 ] {q} <Fatal> SomeComponent: "
+        "unexplained fatal\n",
+        encoding="utf-8",
+    )
+
+    parser = FuzzerLogParser(server_logs=[server_log])
+    found = parser.find_unnamed_fatals()
+
+    assert len(found) == 1
+    assert found[0].endswith("<Fatal> SomeComponent: unexplained fatal")
 
 
 def test_unknown_error_when_no_fatal(tmp_path):

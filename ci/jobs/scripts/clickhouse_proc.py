@@ -1144,8 +1144,12 @@ fi
             f'grep -a -v -F -x "Not running the leak check: other threads are still running." | '
             "head -n 1 || true"
         )
+        # The parser's own fatal-record matcher rather than a bare "<Fatal>" substring: the
+        # latter also matches a query or a comment quoting it on an ordinary <Debug>/<Error>
+        # line, which would send a run that never failed down the blocker branch below.
+        fatal_pattern = FuzzerLogParser.GENERIC_FATAL_PATTERN
         fatal_hits = Shell.get_output(
-            f"cd {self.log_dir} && rg -z --text --no-filename '<Fatal>' clickhouse-server*.log* 2>/dev/null | head -n 1 || true"
+            f"cd {self.log_dir} && rg -z --text --no-filename '{fatal_pattern}' clickhouse-server*.log* 2>/dev/null | head -n 1 || true"
         )
         if sanitizer_hits or fatal_hits:
             # Every server log, not just the one that won the prefilter. Handing the parser a
@@ -1156,8 +1160,8 @@ fi
             # name, stack trace and STID come from it - the same ordering `stderr_logs` gets below.
             server_logs = pick_all_files("clickhouse-server*.log*")
             matched_server = pick_file_with(
-                "clickhouse-server*.err.log*", "<Fatal>"
-            ) or pick_file_with("clickhouse-server*.log*", "<Fatal>")
+                "clickhouse-server*.err.log*", fatal_pattern
+            ) or pick_file_with("clickhouse-server*.log*", fatal_pattern)
             if matched_server:
                 server_logs = [matched_server] + [
                     p for p in server_logs if p != matched_server
@@ -1212,7 +1216,7 @@ fi
                     unexplained_fatal = bool(
                         expected_only
                         and Shell.get_output(
-                            f"rg -z --text '<Fatal>' "
+                            f"rg -z --text '{fatal_pattern}' "
                             f"{' '.join(str(p) for p in server_logs + stderr_logs)}"
                             f" | rg --text -v '{SANITIZER_OOM_PATTERN}|{EXPECTED_KILL_PATTERN}'"
                         )

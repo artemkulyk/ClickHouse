@@ -1,5 +1,4 @@
 import csv
-import fnmatch
 import logging
 import os
 import re
@@ -23,12 +22,13 @@ from ci.praktika.utils import Shell, Utils
 # holds the evidence.
 SERVER_LOG_FAMILY_GLOB = "clickhouse-server*.log*"
 
-# Just the current logs, `clickhouse-server.log` and its `.err.` sibling, with nothing
-# rotated. For the question "how did the server this run ended with die": a `signal 9` in a
-# rotated log belongs to an incarnation that was already replaced and restarted, and the run
-# records its own verdict for that (`Possible deadlock on shutdown`), so reading it as an
-# OOM would excuse that very failure.
-CURRENT_SERVER_LOG_GLOB = "clickhouse-server*.log"
+# The live log pair of one server process - `clickhouse-server.log` and its `.err.` sibling -
+# per replica. Requiring a dotless suffix is what excludes both the logger's rotated files and
+# the phase logs the runners archive by renaming (`clickhouse-server.{initial,stress,final,
+# upgrade}.log`): a `signal 9` in either belongs to an incarnation that was already replaced
+# and restarted, and the run records its own verdict for that (`Possible deadlock on
+# shutdown`), so reading it as an OOM would excuse that very failure.
+LIVE_SERVER_LOG_RE = re.compile(r"^clickhouse-server[^.]*(\.err)?\.log$")
 
 # Failing rows an out-of-memory run cannot produce, matched case-insensitively against the
 # result name. A failed test case, a server that would not come back up and a non-zero script
@@ -71,30 +71,40 @@ def count_harness_kills(results: List[Result]) -> int:
     return sum(1 for r in results if HARNESS_KILL_MARKER in (r.name or "").lower())
 
 
-def count_kill_lines(server_log_path: Path) -> int:
-    """Kill lines in the current server logs, never in rotated ones.
+def _live_log_stem(name: str) -> str:
+    """The server process a live log belongs to, with its two channels folded together."""
+    return name[: -len(".log")].removesuffix(".err")
 
-    A `signal 9` in a rotated log belongs to an incarnation that was already replaced and
-    restarted, and the run records its own verdict for that (`Possible deadlock on
-    shutdown`), so reading it as an OOM would excuse that very failure.
+
+def count_kill_lines(server_log_path: Path) -> int:
+    """Kill lines in the live server logs, counted once per server process.
+
+    The watchdog logs the line at `Fatal`, which both the main log and the `.err.` one
+    receive, so a process's pair is folded to its larger count rather than summed - or a
+    single kill would read as two and pass the run as an OOM on its own. Separate replicas
+    stay separate, since each can be killed in its own right.
     """
-    logs = _log_family(
-        server_log_path, lambda name: fnmatch.fnmatch(name, CURRENT_SERVER_LOG_GLOB)
-    )
+    logs = _log_family(server_log_path, LIVE_SERVER_LOG_RE.match)
     if not logs:
         return 0
-    # `rg -c` prints one `path:count` line per file that matched, or a bare count for a
-    # single file; nothing at all when no file matched.
+    # `--with-filename` forces the `path:count` form that a single file would otherwise
+    # print bare; a file with no match is left out of the output entirely.
     output = Shell.get_output(
-        f"rg -Fac -- '{KILL_LINE}' " + " ".join(f"'{log}'" for log in logs)
+        f"rg -Fac --with-filename -- '{KILL_LINE}' "
+        + " ".join(f"'{log}'" for log in logs)
     )
-    return sum(
-        int(line.rsplit(":", 1)[-1]) for line in output.splitlines() if line.strip()
-    )
+    per_process: dict[str, int] = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        path, _, count = line.rpartition(":")
+        stem = _live_log_stem(Path(path).name)
+        per_process[stem] = max(per_process.get(stem, 0), int(count))
+    return sum(per_process.values())
 
 
 def server_log_reports_oom(server_log_path: Path, results: List[Result]) -> bool:
-    """Whether the current server logs hold a SIGKILL the harness did not send.
+    """Whether the live server logs hold a SIGKILL the harness did not send.
 
     Each harness kill is announced by a `Warning: server did not stop yet` row, so only
     a kill line beyond those can be the kernel's - and only that one may pass the run
@@ -107,7 +117,7 @@ def server_log_reports_oom(server_log_path: Path, results: List[Result]) -> bool
     harness_kills = count_harness_kills(results)
     if kill_lines <= harness_kills:
         print(
-            f"{kill_lines} kill line(s) in the current server logs, all accounted for by "
+            f"{kill_lines} kill line(s) in the live server logs, all accounted for by "
             f"{harness_kills} harness-initiated kill(s): not an OOM"
         )
         return False
@@ -479,8 +489,8 @@ def select_replica_failures(
                     specific_results.append((name, description, files))
                 continue
             # `UNKNOWN_ERROR` says only that no pattern got a genuine match. A `<Fatal>`
-            # the anchored generic fallback did not see (`find_unnamed_fatals` scans
-            # unanchored) is still crash evidence and has to outrank the expected lines.
+            # record left unclassified is still crash evidence and has to outrank the
+            # expected lines.
             unnamed_fatals = log_parser.find_unnamed_fatals()
             if unnamed_fatals and fatal_result is None:
                 fatal_result = (
@@ -596,9 +606,9 @@ def run_stress_test(upgrade_check: bool = False) -> None:
     test_results, additional_logs = process_results(result_path, server_log_path)
 
     # Check for OOM (signal 9) in server logs. This sets `is_oom`, which rewrites the whole
-    # job to OK at the end, so it reads the current logs only - a kill line in a rotated log
-    # describes an already-restarted server rather than this run's outcome - and discounts
-    # the kills the harness itself announced in `test_results`.
+    # job to OK at the end, so it reads the live logs only - a kill line in a rotated or
+    # archived phase log describes an already-restarted server rather than this run's
+    # outcome - and discounts the kills the harness itself announced in `test_results`.
     is_oom = is_oom or server_log_reports_oom(server_log_path, test_results)
 
     server_died = False

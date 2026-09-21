@@ -310,24 +310,18 @@ class FuzzerLogParser:
         return ""
 
     def find_unnamed_fatals(self, limit=MATCH_WINDOW_LINES):
-        """`<Fatal>` lines that no `EXPECTED_PATTERNS` line explains.
+        """`<Fatal>` records that no `EXPECTED_PATTERNS` line explains.
 
-        `parse_failure` returns `UNKNOWN_ERROR` whenever no `ERROR_PATTERNS` entry got a
-        genuine match, which is not the same as there being nothing left to report: a fatal
-        the parser cannot classify produces the same verdict. Callers about to explain an
-        `UNKNOWN_ERROR` away must check here first, or that fatal is silently dropped.
-        `dolor.py` fails a run on the same evidence (any `<Fatal>` bar the expected kill),
-        so the two verdicts agree.
+        A fatal the parser cannot classify comes back as `UNKNOWN_ERROR` too, so a caller
+        about to explain that verdict away has to check here first or drop it silently.
+        Anchored to `GENERIC_FATAL_PATTERN` like `get_generic_fatal`, so a "<Fatal>" quoted
+        in query text is not crash evidence.
         """
         found = []
         for log in self.server_logs:
             if not log:
                 continue
-            output = Shell.get_output(
-                f"rg -z --text -o -m {self.SCAN_MATCHES} '.*<Fatal>.*' {log}",
-                strict=False,
-            )
-            for line in output.splitlines():
+            for _, line in self.failure_candidates(self.GENERIC_FATAL_PATTERN, log):
                 if line.strip() and not re.search(SANITIZER_OOM_PATTERN, line):
                     found.append(line)
                     if len(found) >= limit:

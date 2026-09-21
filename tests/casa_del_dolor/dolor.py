@@ -784,7 +784,7 @@ while all_running and (not reached_limit):
                 # Going on would reach `start_clickhouse`, which takes a live pid for
                 # "already running", so the restart would silently never happen.
                 logger.error(
-                    f"Server {next_pick.name} is still running after the stop attempt "
+                    f"Server {next_pick.name} is still running after a stop attempt "
                     "during a scheduled restart"
                 )
                 stop_failed_during_run.add(next_pick.name)
@@ -953,7 +953,7 @@ for server in servers:
         server.stop_clickhouse(stop_wait_sec=SERVER_STOP_WAIT_SECONDS, kill=False)
         if server.get_process_pid("clickhouse") is not None:
             logger.warning(
-                f"Instance {server.name} is still running after stop command"
+                f"Instance {server.name} is still running after a stop attempt"
             )
             # `stop_clickhouse` swallowed something and never reached its own force kill,
             # so nothing has dumped this server yet and it is still alive to be dumped.

@@ -290,6 +290,33 @@ def test_kill_line_in_current_err_log_counts(tmp_path):
     assert server_log_reports_oom(tmp_path, [])
 
 
+def test_kill_line_in_archived_phase_log_only_is_not_oom(tmp_path):
+    # `stress_runner.sh` / `upgrade_runner.sh` archive each phase's log by renaming it, so
+    # by the time this runs `clickhouse-server.log` is gone and only the phase logs remain.
+    # A kill in one of them belongs to a server that was already replaced and restarted.
+    for phase in ("initial", "stress", "final", "upgrade"):
+        (tmp_path / f"clickhouse-server.{phase}.log").write_text(_KILL_LINE)
+    assert not server_log_reports_oom(tmp_path, [])
+
+
+def test_kill_line_duplicated_into_err_log_counts_once(tmp_path):
+    # The watchdog logs the kill at `Fatal`, so the same event lands in both channels.
+    # Summing them would turn one harness-sent kill into two and pass the run as an OOM.
+    (tmp_path / "clickhouse-server.log").write_text(_QUIET_LOG + _KILL_LINE)
+    (tmp_path / "clickhouse-server.err.log").write_text(_KILL_LINE)
+    assert not server_log_reports_oom(
+        tmp_path, [_row("Warning: server did not stop yet")]
+    )
+
+
+def test_kill_lines_on_separate_replicas_are_summed(tmp_path):
+    # Folding the two channels of one process together must not fold two processes
+    # together: each replica can be killed in its own right.
+    (tmp_path / "clickhouse-server.log").write_text(_KILL_LINE)
+    (tmp_path / "clickhouse-server-sc1.log").write_text(_KILL_LINE)
+    assert server_log_reports_oom(tmp_path, [_row("Warning: server did not stop yet")])
+
+
 def test_no_server_logs_is_not_oom(tmp_path):
     assert not server_log_reports_oom(tmp_path / "missing", [])
     assert not server_log_reports_oom(tmp_path, [])
