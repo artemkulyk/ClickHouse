@@ -903,6 +903,23 @@ void StatementGenerator::generateNextTablePartition(
 
     if (t.isMergeTreeFamily(true))
     {
+        if (rg.nextMediumNumber() < 4)
+        {
+            if (allow_parts == 2 || (allow_parts == 1 && rg.nextBool()))
+            {
+                pexpr->set_part(FuzzConfig::getRandomFuzzedPartName(rg.nextInFullRange()));
+            }
+            else if (rg.nextBool())
+            {
+                pexpr->set_partition(FuzzConfig::getRandomFuzzedPartitionValue(rg.nextInFullRange()));
+            }
+            else
+            {
+                pexpr->set_partition_id(FuzzConfig::getRandomFuzzedPartitionId(rg.nextInFullRange()));
+            }
+            return;
+        }
+
         const String dname = t.getDatabaseName();
         const String tname = t.getBaseName();
 

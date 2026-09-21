@@ -463,6 +463,12 @@ public:
 
     String getRandomFileSystemCacheValue();
 
+    static String getRandomFuzzedPartName(uint64_t rand_val);
+
+    static String getRandomFuzzedPartitionValue(uint64_t rand_val);
+
+    static String getRandomFuzzedPartitionId(uint64_t rand_val);
+
     bool tableHasPartitions(bool detached, const String & database, const String & table);
 
     String tableGetRandomPartitionOrPart(uint64_t rand_val, bool detached, bool partition, const String & database, const String & table);

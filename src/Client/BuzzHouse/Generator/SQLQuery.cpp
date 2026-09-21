@@ -1296,6 +1296,10 @@ StatementGenerator::FromSourceInfo StatementGenerator::joinedTableOrFunction(
                     {
                         pl->add_parts(fc.tableGetRandomPartitionOrPart(rg.nextInFullRange(), false, false, dname, tname));
                     }
+                    else if (rg.nextBool())
+                    {
+                        pl->add_parts(FuzzConfig::getRandomFuzzedPartName(rg.nextInFullRange()));
+                    }
                 }
             }
             rel.cols.emplace_back(SQLRelationCol(rel_name, {"part_name"}, string_tp.get()));
