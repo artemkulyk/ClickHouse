@@ -435,6 +435,22 @@ class ReplicaFailures:
     expected_only_oom: bool = False
 
 
+# Ranking inside the expected-only tier, which needs one of its own because every verdict
+# in it is "named": a sanitizer OOM report is the only one that can pass the run - it says
+# the run ran out of memory - so another replica's routine kill line must not mask it, and
+# both say more than a nameless verdict. Without this the tier is first-come, and which
+# replica the job happens to scan first decides whether the run is allowed its OOM.
+_FALLBACK_UNKNOWN, _FALLBACK_NAMED, _FALLBACK_OOM = 0, 1, 2
+
+
+def _fallback_rank(name: str, description: str) -> int:
+    if name == FuzzerLogParser.UNKNOWN_ERROR:
+        return _FALLBACK_UNKNOWN
+    if re.search(SANITIZER_OOM_REPORT_PATTERN, description):
+        return _FALLBACK_OOM
+    return _FALLBACK_NAMED
+
+
 def select_replica_failures(
     replica_log_pairs: List[Tuple[str, List[Path], List[Path]]],
 ) -> ReplicaFailures:
@@ -503,13 +519,13 @@ def select_replica_failures(
             name, description, files = log_parser.parse_failure(
                 allow_expected_only=True
             )
-            # Keep the first fallback, but let a named expected-only verdict replace an
-            # earlier replica's nameless one.
-            if fallback_result is None or (
-                fallback_result[0] == FuzzerLogParser.UNKNOWN_ERROR
-                and name != FuzzerLogParser.UNKNOWN_ERROR
-            ):
-                fallback_result = (name, f"{file_pair_info}\n{description}", files)
+            # Keep the highest-ranked fallback rather than the first, so the tier does not
+            # depend on the order the replicas are scanned in.
+            candidate: Finding = (name, f"{file_pair_info}\n{description}", files)
+            if fallback_result is None or _fallback_rank(
+                candidate[0], candidate[1]
+            ) > _fallback_rank(fallback_result[0], fallback_result[1]):
+                fallback_result = candidate
         except Exception as e:
             print(
                 f"ERROR: Failed to parse failure logs for {replica_name} "
@@ -525,12 +541,13 @@ def select_replica_failures(
         return ReplicaFailures(results=[memory_limit_result])
     if fallback_result is not None:
         name, description, _ = fallback_result
-        expected_only = name != FuzzerLogParser.UNKNOWN_ERROR
+        # Read off the same rank the selection used, so what was picked and what it is
+        # reported as can never disagree.
+        rank = _fallback_rank(name, description)
         return ReplicaFailures(
             results=[fallback_result],
-            expected_only=expected_only,
-            expected_only_oom=expected_only
-            and bool(re.search(SANITIZER_OOM_REPORT_PATTERN, description)),
+            expected_only=rank != _FALLBACK_UNKNOWN,
+            expected_only_oom=rank == _FALLBACK_OOM,
         )
     return ReplicaFailures()
 
