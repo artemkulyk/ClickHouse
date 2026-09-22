@@ -24,6 +24,7 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Common/CurrentMetrics.h>
 #include <Common/likePatternToRegexp.h>
+#include <Common/re2.h>
 
 #include <IO/ReadBufferFromString.h>
 #include <IO/WriteBufferFromOStream.h>
@@ -181,6 +182,13 @@ const std::unordered_set<String> noncrypto_hash_functions = {
     "wyHash64",   "xxHash32",    "xxHash64",       "xxHash64Spark",  "xxh3",           "farmFingerprint64", "gccMurmurHash",
 };
 
+/// Column-name-like globs, shared with the `LIKE` clause of SHOW/TRUNCATE. The escaped and
+/// re2-metacharacter entries reach the quoting and escape branches of `likePatternToRegexp`; a
+/// trailing backslash is absent because it throws there instead of reaching the server.
+static const Strings like_patterns
+    = {"%", "c%", "%a%", "_", "col%", "%1", "a_c", "%_%", "ID%", "a.c%", "%(c)%", "%[c]%",
+       "%c+%", "^c$", "{c}%", "\\%c", "c\\_", "%\\\\%", "\\d%"};
+
 /// Configures a regexp column matcher with a random column-name-like glob pattern, storing the
 /// regexp the parser would produce (ILIKE/case-insensitive prepends `(?i)`). With `as_like` it
 /// renders as `* LIKE/ILIKE '<glob>'`; otherwise as the plain `COLUMNS('<regexp>')` form. Shared
@@ -189,7 +197,20 @@ const std::unordered_set<String> noncrypto_hash_functions = {
 template <typename Matcher, typename Rng>
 void setAsteriskLikeMatcher(Matcher & matcher, Rng & rng, bool as_like = true)
 {
-    static const Strings like_patterns = {"%", "c%", "%a%", "_", "col%", "%1", "a_c", "%_%", "ID%"};
+    /// `COLUMNS('re')` takes a real regexp, so that form also gets constructs no glob can express.
+    /// Nothing turns `format_as_asterisk_like` back on, so the glob can stay empty.
+    static const Strings matcher_regexps
+        = {"^c", "c$", "c0|c1", "^(c|col)[0-9]*$", "[[:digit:]]", "(?i)^C", "(?s).", "^$", "\\bc", "("};
+
+    if (!as_like && rng() % 2 == 0)
+    {
+        matcher.setPattern(matcher_regexps[rng() % matcher_regexps.size()]);
+        matcher.format_as_asterisk_like = false;
+        matcher.asterisk_like_case_insensitive = false;
+        matcher.asterisk_like_pattern.clear();
+        return;
+    }
+
     const String & pattern = like_patterns[rng() % like_patterns.size()];
     const bool case_insensitive = rng() % 2 == 0;
 
@@ -669,16 +690,28 @@ Field QueryFuzzer::fuzzField(Field field)
                 break;
             case 6:
             case 7:
-                /// For LIKE strings
+                /// For LIKE strings: flip the wildcards, and sometimes escape one or leave a
+                /// trailing backslash, the one escape sequence a LIKE pattern rejects.
                 if (str.size() < 128)
                 {
-                    for (auto & c : str)
+                    String res;
+                    for (char c : str)
                     {
                         if ((c == '_' || c == '%') && ((fuzz_rand() % 2) == 0))
                         {
                             c = (c == '_') ? '%' : '_';
                         }
+                        if ((c == '_' || c == '%') && fuzz_rand() % 4 == 0)
+                        {
+                            res += '\\';
+                        }
+                        res += c;
                     }
+                    if (fuzz_rand() % 8 == 0)
+                    {
+                        res += '\\';
+                    }
+                    str = std::move(res);
                 }
                 break;
             case 8:
@@ -928,8 +961,20 @@ ASTPtr QueryFuzzer::makeFuzzedColumnTransformers()
         switch (fuzz_rand() % 3)
         {
             case 0: {
-                static const Strings except_regexps = {"c.*", ".*", "^c", "[0-9]", "col.*"};
-                except->setPattern(except_regexps[fuzz_rand() % except_regexps.size()]);
+                /// Applied unanchored with `PartialMatch`: `''` erases every column, `^$` none, and the
+                /// last three do not compile.
+                static const Strings except_regexps
+                    = {"c.*", ".*", "^c", "[0-9]", "col.*", "", "^$", "1$", "^_",
+                       "(?i)C.*", "\\d+", "[[:alpha:]]", "a'b", "\\\\", "(", "(?=c)", "a{1001}"};
+                /// Half the time anchor on a column that is really there, so the transformer removes
+                /// something. The name is escaped because the pool holds formatted expressions too.
+                const auto * ident = column_like.empty()
+                    ? nullptr
+                    : typeid_cast<const ASTIdentifier *>(column_like[fuzz_rand() % column_like.size()].second.get());
+                if (ident && fuzz_rand() % 2 == 0)
+                    except->setPattern("^" + re2::RE2::QuoteMeta(ident->shortName()) + "$");
+                else
+                    except->setPattern(except_regexps[fuzz_rand() % except_regexps.size()]);
                 break;
             }
             case 1: except->children.push_back(make_intrusive<ASTIdentifier>(random_column_name())); break;
@@ -3464,11 +3509,17 @@ void QueryFuzzer::fuzzClusterFunctionArguments(ASTFunction & fn)
         args.front() = make_intrusive<ASTLiteral>(String(pickRandomly(fuzz_rand, distributed_cluster_names)));
 }
 
-/// Interesting regexps for merge() argument fuzzing. `table_regexps` includes the empty pattern (an
-/// empty regexp matches all tables); `nonempty_regexps` omits it because REGEXP() rejects an empty string.
+/// Interesting regexps for merge() argument fuzzing. merge() matches them with
+/// `OptimizedRegularExpression`, so they cover all four of its `match` paths.
 static const std::vector<String> merge_databases = {"default", "system", "information_schema"};
-static const std::vector<String> nonempty_regexps = {".*", ".+", "^", "t.*", ".*[0-9].*", "^system$"};
-static const std::vector<String> table_regexps = {".*", ".+", "^", "", "t.*", ".*[0-9].*"};
+static const std::vector<String> nonempty_regexps
+    = {".*", ".+", "^", "t.*", ".*[0-9].*", "^system$", "system", "(?i)SYSTEM", "^sys", "em$",
+       "^(system|default)$", "(?m)^system$", "sys.*em", "^\\w+$", "("};
+/// The same list plus the empty pattern, which matches every table; `nonempty_regexps` omits it
+/// because a database `REGEXP('')` is rejected.
+static const std::vector<String> table_regexps
+    = {".*", ".+", "^", "", "t.*", ".*[0-9].*", "^system$", "system", "(?i)SYSTEM", "^sys", "em$",
+       "^(system|default)$", "(?m)^system$", "sys.*em", "^\\w+$", "("};
 
 /// Fuzz the merge() table function arguments: merge(['db_name_or_regexp',] 'tables_regexp').
 /// Rewrites the table regexp and fuzzes/toggles the optional database (plain name or REGEXP('...')).
@@ -3501,6 +3552,16 @@ void QueryFuzzer::fuzzMergeFunctionArguments(ASTFunction & fn)
         else
             args.front() = make_database_argument();
     }
+}
+
+/// A `LIKE` clause pattern for SHOW/TRUNCATE. These reach the server as query text rather than
+/// through `likePatternToRegexp`, so they can also carry the trailing backslash it rejects.
+String QueryFuzzer::makeFuzzedLikePattern()
+{
+    String res = pickRandomly(fuzz_rand, like_patterns);
+    if (fuzz_rand() % 8 == 0)
+        res += '\\';
+    return res;
 }
 
 /// A brace expansion of 1..4 items — a {m..n} range or an {a,b,...} enumeration. Shared by the remote
@@ -7248,6 +7309,8 @@ void QueryFuzzer::fuzz(ASTPtr & ast)
                     drop_query->not_like = !drop_query->not_like;
                 if (fuzz_rand() % 20 == 0)
                     drop_query->case_insensitive_like = !drop_query->case_insensitive_like;
+                if (fuzz_rand() % 20 == 0)
+                    drop_query->like = makeFuzzedLikePattern();
             }
         }
         /// Multi-table DROP t1, t2: remove, duplicate or shuffle entries (table identifiers
@@ -8481,6 +8544,8 @@ void QueryFuzzer::fuzz(ASTPtr & ast)
             show_tables->case_insensitive_like = !show_tables->case_insensitive_like;
         if (fuzz_rand() % 20 == 0 && !show_tables->like.empty())
             show_tables->like.clear();
+        else if (fuzz_rand() % 20 == 0)
+            show_tables->like = makeFuzzedLikePattern();
         fuzz(show_tables->children);
     }
     else if (auto * show_columns = typeid_cast<ASTShowColumnsQuery *>(ast.get()))
@@ -8495,6 +8560,8 @@ void QueryFuzzer::fuzz(ASTPtr & ast)
             show_columns->case_insensitive_like = !show_columns->case_insensitive_like;
         if (fuzz_rand() % 20 == 0 && !show_columns->like.empty())
             show_columns->like.clear();
+        else if (fuzz_rand() % 20 == 0)
+            show_columns->like = makeFuzzedLikePattern();
         fuzz(show_columns->children);
     }
     else if (auto * show_indexes = typeid_cast<ASTShowIndexesQuery *>(ast.get()))
@@ -8509,6 +8576,8 @@ void QueryFuzzer::fuzz(ASTPtr & ast)
             show_functions->case_insensitive_like = !show_functions->case_insensitive_like;
         if (fuzz_rand() % 20 == 0 && !show_functions->like.empty())
             show_functions->like.clear();
+        else if (fuzz_rand() % 20 == 0)
+            show_functions->like = makeFuzzedLikePattern();
     }
     else if (auto * partition = typeid_cast<ASTPartition *>(ast.get()))
     {
