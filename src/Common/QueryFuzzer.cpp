@@ -185,7 +185,7 @@ const std::unordered_set<String> noncrypto_hash_functions = {
 /// Column-name-like globs, shared with the `LIKE` clause of SHOW/TRUNCATE. The escaped and
 /// re2-metacharacter entries reach the quoting and escape branches of `likePatternToRegexp`; a
 /// trailing backslash is absent because it throws there instead of reaching the server.
-static const Strings like_patterns
+const Strings like_patterns
     = {"%", "c%", "%a%", "_", "col%", "%1", "a_c", "%_%", "ID%", "a.c%", "%(c)%", "%[c]%",
        "%c+%", "^c$", "{c}%", "\\%c", "c\\_", "%\\\\%", "\\d%"};
 
