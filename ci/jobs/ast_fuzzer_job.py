@@ -162,6 +162,14 @@ BUZZHOUSE_EXCEPTION_EXIT_CODE = BUZZHOUSE_EXCEPTION_ERROR_CODE & 0xFF
 AST_FUZZER_ORACLE_EXIT_CODE = 49
 AST_FUZZER_ORACLE_MARKER = "AST FUZZER ORACLE MISMATCH"
 
+# The other way an oracle mismatch ends the run: the peer-server comparison in
+# `processWithASTFuzzer` throws AST_FUZZER_ORACLE_MISMATCH instead of taking the `_exit`
+# path above, so there is no marker and `Client::main` returns 906 -> exit 138. That exit
+# code is not a dedicated one either (it is also SIGBUS as 128+10), hence the `Code: 906`
+# line is what names it.
+AST_FUZZER_ORACLE_THROW_ERROR_CODE = 906
+AST_FUZZER_ORACLE_THROW_EXIT_CODE = AST_FUZZER_ORACLE_THROW_ERROR_CODE & 0xFF
+
 # Genuine (non-OOM) failure signals that veto the OOM-is-success downgrade, so a crash on
 # one node isn't hidden by a benign OOM on another. `is_memory_limit_exceeded` is excluded
 # (surviving the memory cap is itself benign), and bare signal numbers are excluded too (the
@@ -449,6 +457,20 @@ def analyze_job_logs(
         and not server_fuzzer
         else ""
     )
+    # Same finding as `ast_oracle_error`, reached by a throw rather than the marker path, so
+    # the `Code: 906` line stands in for the marker. Unlike that one this is not gated on the
+    # fuzzer mode: the throw needs a peer server, which only a BuzzHouse config supplies, so
+    # it can fire in a run this job labels `buzzhouse` too. Only the tail, for the same reason
+    # as the BuzzHouse oracle above - the client exits on it, so the last match ended the run.
+    ast_oracle_throw_error = (
+        Shell.get_output(
+            f"tail -n1000 {fuzzer_log}"
+            f" | rg --text -o 'Code: {AST_FUZZER_ORACLE_THROW_ERROR_CODE}[.].*'"
+            " | tail -n1"
+        ).strip()
+        if fuzzer_exit_code == AST_FUZZER_ORACLE_THROW_EXIT_CODE and not server_died
+        else ""
+    )
     buzzhouse_error = (
         Shell.get_output(
             f"rg --text -o 'DB::Exception: Found disallowed error code.*' {fuzzer_log}"
@@ -464,6 +486,7 @@ def analyze_job_logs(
     client_finding = (
         oracle_finding
         or bool(ast_oracle_error)
+        or bool(ast_oracle_throw_error)
         or bool(buzzhouse_error)
         or (fuzzer_exit_code == BUZZHOUSE_EXCEPTION_EXIT_CODE and not server_died)
     )
@@ -523,6 +546,11 @@ def analyze_job_logs(
         # reproducer query and the server-side oracle output.
         status = Result.Status.ERROR
         info.append(f"ERROR: AST fuzzer oracle mismatch\n{ast_oracle_error}")
+    elif ast_oracle_throw_error:
+        # Same finding as above, but the peer-server comparison threw instead of exiting
+        # through the marker path, so the exception line is all there is to report.
+        status = Result.Status.ERROR
+        info.append(f"ERROR: AST fuzzer oracle mismatch\n{ast_oracle_throw_error}")
     else:
         status = Result.Status.ERROR
         # The server was alive, but the fuzzer returned some error. This might
