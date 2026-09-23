@@ -1618,15 +1618,17 @@ class JobConfigs:
                 "./ci/jobs/scripts/log_export.py",
                 "./ci/jobs/scripts/log_cluster.py",
                 "./ci/jobs/scripts/functional_tests/setup_log_cluster.sh",
-                # Copied into the server config by `run-fuzzer.sh`
-                "./tests/config/users.d/ci_logs_sender.yaml",
                 "./ci/jobs/scripts/fuzzer/",
                 "./ci/jobs/scripts/server_fuzzer/",
                 "./tests/casa_del_dolor/",
                 # The whole tree, as Keeper Stress does: listing only the imported modules
                 # misses the configs `cluster.py` reads through `write_embedded_config`.
                 "./tests/integration/helpers/",
-                "./tests/config/config.d/core_dump.yaml",
+                # `dolor.py` mounts the TLS material out of `tests/config` as `main_configs`, and
+                # `cluster.py` copies these two out of `CLICKHOUSE_TESTS_BASE_CONFIG_DIR`.
+                "./tests/config/",
+                "./programs/server/config.xml",
+                "./programs/server/users.xml",
                 "./ci/docker/fuzzer",
             ],
         ),
