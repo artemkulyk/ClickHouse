@@ -189,6 +189,8 @@ Type of filter to use with custom key for parallel replicas. default - use modul
 
 Decide whether and where to use parallel replicas by analyzing the query plan, as opposed to the query-tree-based analysis. As a result, a plan fragment is sent to the remote replicas instead of a SQL query. Experimental.
 
+Has no effect on a distributed `INSERT SELECT` ([parallel_distributed_insert_select](/reference/settings/session-settings/parallel#parallel_distributed_insert_select) = 2), which ships the whole `INSERT` as a query to every replica: a replica executing that query reads with the query-tree-based implementation, so the initiator, taking part as one more replica, uses it too.
+
 ## parallel_replicas_prefer_local_join {#parallel_replicas_prefer_local_join}
 
 <SettingsInfoBlock type="Bool" default_value="1" />
